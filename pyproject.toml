@@ -1,0 +1,40 @@
+[project]
+name = "openmeteo2mqtt"
+version = "0.1.0"
+description = "Populates MQTT topics with openmeteo data."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "kimiconfig>=0.3.1",
+    "kimiutils>=0.2.6",
+    "kimqtt>=0.1.7",
+    "openmeteo-requests>=1.5.0",
+    "openmeteo-sdk>=1.20.0",
+    "pandas>=2.2.3",
+    "requests-cache>=1.2.1",
+    "retry-requests>=2.0.0",
+    "rich>=14.0.0",
+    "schedule>=1.2.2",
+]
+
+[tool.setuptools]
+packages = ["openmeteo2mqtt"]
+package-dir = {"" = "src"}
+
+[project.scripts]
+openmeteo2mqtt = "openmeteo2mqtt.main:main"
+
+[tool.uv]
+index = [
+    { url = "http://kimihome.lan:58080/simple/" },
+    ]
+extra-index-url = ["https://pypi.org/simple"]
+package = true
+
+[tool.uv.sources]
+openmeteo2mqtt = { workspace = true }
+
+[dependency-groups]
+dev = [
+    "openmeteo2mqtt",
+]
