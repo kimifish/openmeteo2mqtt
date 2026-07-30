@@ -10,13 +10,15 @@ This project is licensed under the MIT License.
 
 ## Features
 
-*   Fetches current weather data, hourly forecasts, and daily forecasts from the [Open-Meteo API](https://open-meteo.com/).
+*   Fetches current weather data, hourly forecasts for the next 24 hours, and daily forecasts from the [Open-Meteo API](https://open-meteo.com/).
 *   Publishes weather data to specified MQTT topics.
 *   Periodically updates weather data at a configurable interval.
 *   Highly configurable via a YAML file (`config.yaml`).
 *   Supports caching of API requests to reduce load and improve speed.
-*   Includes retry logic for API requests.
+*   Uses bounded HTTP and MQTT timeouts, retries, and backoff so temporary network failures do not stop the service.
+*   Publishes retained availability and per-update status topics for stale-data monitoring.
 *   Provides human-readable weather condition descriptions based on weather codes.
+*   **NEW:** Supports SOCKS5 proxy for accessing Open-Meteo API (useful for bypassing regional restrictions).
 
 ## Prerequisites
 
@@ -59,10 +61,13 @@ The application is configured using a YAML file. By default, it looks for `confi
 2.  `$XDG_CONFIG_HOME/openmeteo2mqtt/config.yaml` (e.g., `~/.config/openmeteo2mqtt/config.yaml`)
 3.  `~/.config/openmeteo2mqtt/config.yaml` (if `$XDG_CONFIG_HOME` is not set)
 
-Create a `config.yaml` file. You can start by copying the example below:
+Create a `config.yaml` file. You can start by copying `config.example.yaml` from the repository or use the example below:
 
 ```yaml
-update_interval_in_minutes: 15 # How often to fetch new data
+update_interval_in_minutes: 15 # How often to fetch new current weather data
+
+forecast:
+  update_interval_in_minutes: 60 # Optional. Defaults to max(update_interval_in_minutes, 60)
 
 mqtt:
   server: "mqtt.lan" # Your MQTT broker address (can be a list for failover)
@@ -71,6 +76,18 @@ mqtt:
   #   - "mqtt.secondary.lan"
   port: 1883 # Your MQTT broker port
   topic: "weather" # Base MQTT topic for weather data
+  connect_timeout_seconds: 10
+  publish_timeout_seconds: 10
+  reconnect_attempts: 3
+  retry_delay_seconds: 5
+  qos: 1 # Wait for broker acknowledgement
+  retain: true # Keep the last successful values for reconnecting consumers
+
+http:
+  connect_timeout_seconds: 10
+  read_timeout_seconds: 30
+  retries: 4
+  backoff_factor: 1
 
 # Open-Meteo API URL (usually no need to change)
 url: "https://api.open-meteo.com/v1/forecast"
@@ -81,6 +98,7 @@ params:
   longitude: 37.62 # Your longitude
   timezone: "Europe/Moscow" # Your timezone
   forecast_days: 3 # Number of days for daily forecast
+  # Hourly forecast is always limited to the next 24 hours via forecast_hours=24
 
   # Weather variables to fetch for current weather
   current:
@@ -149,6 +167,19 @@ weather_codes:
 ```
 For a full list of weather codes, refer to your `config.yaml` or the Open-Meteo documentation.
 
+## SOCKS5 Proxy Support
+
+If you encounter issues accessing the Open-Meteo API from your location (due to regional restrictions), you can configure the application to use a SOCKS5 proxy:
+
+```yaml
+# Optional SOCKS5 proxy settings for accessing Open-Meteo API
+proxy:
+  url: "your-proxy-server.com"
+  port: 1080
+```
+
+When proxy settings are configured, all API requests to Open-Meteo will be routed through the specified SOCKS5 proxy. If proxy settings are not provided or are empty, the application will connect directly to the API.
+
 ## Usage
 
 Once installed and configured, you can run the application using the following command:
@@ -200,14 +231,45 @@ The following subtopics are used:
       "wind_direction_10m": 270
     }
     ```
-*   `{base_topic}/hourly`: JSON string with hourly forecast data.
+*   `{base_topic}/hourly`: JSON string with hourly forecast data for the next 24 hours.
     Example: `weather/hourly`
-    *Note: The current implementation for hourly data ([`process_hourly_forecast_data_to_JSON`](src/openmeteo2mqtt/main.py:73) in [`src/openmeteo2mqtt/main.py`](src/openmeteo2mqtt/main.py:1)) currently returns an empty dictionary. It uses pandas DataFrames internally and has a TODO to output JSON.*
 *   `{base_topic}/daily`: JSON string with daily forecast data.
     Example: `weather/daily`
-    *Note: The current implementation for daily data ([`process_daily_forecast_data_to_JSON`](src/openmeteo2mqtt/main.py:112) in [`src/openmeteo2mqtt/main.py`](src/openmeteo2mqtt/main.py:1)) currently returns an empty dictionary. It uses pandas DataFrames internally and has a TODO to output JSON.*
+    Both forecast topics now publish structured JSON in the form:
+    ```json
+    {
+      "updated_at": "2026-04-15T12:00:00",
+      "entries": [
+        {
+          "time": "2026-04-15T13:00:00",
+          "temperature_2m": 12.3,
+          "weather_code": 3,
+          "weather_condition": "сплошная облачность"
+        }
+      ]
+    }
+    ```
+*   `{base_topic}/availability`: retained `online`/`offline` service availability. The MQTT last will publishes `offline` after an ungraceful disconnect.
+*   `{base_topic}/status/current` and `{base_topic}/status/forecast`: retained JSON status. A failed update is reported as `state: error` without terminating the service; the next scheduled update is still attempted.
 
-The exact structure of the JSON payloads for hourly and daily forecasts might need further inspection or refinement in the code if detailed JSON output is required for these topics.
+## Open-Meteo Limits
+
+Open-Meteo free tier currently lists these limits on the pricing page:
+
+*   600 calls per minute
+*   5,000 calls per hour
+*   10,000 calls per day
+*   300,000 calls per month
+
+Open-Meteo also states that requests with more than 10 variables count as multiple API calls. With the example configuration in this README:
+
+*   current request: 12 variables, so about `1.2` API calls per request
+*   forecast request: 11 hourly + 1 daily variable, so about `1.2` API calls per request
+*   current updates every 15 minutes: about `115.2` API calls per day and `3456` per 30-day month
+*   forecast updates every 60 minutes: about `28.8` API calls per day and `864` per 30-day month
+*   total: about `144` API calls per day and `4320` per 30-day month
+
+That is far below the free-tier ceilings, so the application now refreshes forecasts hourly by default. This also matches Open-Meteo's own recommendation to update forecast data every hour.
 
 ## Dependencies
 

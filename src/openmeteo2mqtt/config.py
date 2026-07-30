@@ -13,7 +13,7 @@ from rich.logging import RichHandler
 from rich.traceback import install as install_rich_traceback 
 import argparse
 
-cfg = Config(convert_digit_keys=False)
+cfg = Config()
 
 APP_NAME = 'openmeteo2mqtt'
 HOME_DIR = os.path.expanduser("~")
@@ -196,9 +196,51 @@ cfg.validate_config(
 
         ('mqtt.server', 'mqtt.lan'),
         ('mqtt.port', 1883),
-        ('mqtt.topic', 'audio/YouTube_player'),
+        ('mqtt.topic', 'weather'),
+        ('mqtt.connect_timeout_seconds', 10),
+        ('mqtt.publish_timeout_seconds', 10),
+        ('mqtt.reconnect_attempts', 3),
+        ('mqtt.retry_delay_seconds', 5),
+        ('mqtt.qos', 1),
+        ('mqtt.retain', True),
+
+        ('forecast.update_interval_in_minutes', None),
+
+        ('http.connect_timeout_seconds', 10),
+        ('http.read_timeout_seconds', 30),
+        ('http.retries', 4),
+        ('http.backoff_factor', 1),
+
+        ('proxy.url', None),
+        ('proxy.port', None),
     ]
 )
+
+
+def _validate_positive_number(name, value, allow_zero=False):
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(f'{name} must be a number')
+    if value < 0 or (value == 0 and not allow_zero):
+        qualifier = 'non-negative' if allow_zero else 'positive'
+        raise ValueError(f'{name} must be {qualifier}')
+
+
+_validate_positive_number('update_interval_in_minutes', cfg.update_interval_in_minutes)
+if cfg.forecast.update_interval_in_minutes is not None:
+    _validate_positive_number(
+        'forecast.update_interval_in_minutes',
+        cfg.forecast.update_interval_in_minutes,
+    )
+_validate_positive_number('http.connect_timeout_seconds', cfg.http.connect_timeout_seconds)
+_validate_positive_number('http.read_timeout_seconds', cfg.http.read_timeout_seconds)
+_validate_positive_number('http.retries', cfg.http.retries, allow_zero=True)
+_validate_positive_number('http.backoff_factor', cfg.http.backoff_factor, allow_zero=True)
+_validate_positive_number('mqtt.connect_timeout_seconds', cfg.mqtt.connect_timeout_seconds)
+_validate_positive_number('mqtt.publish_timeout_seconds', cfg.mqtt.publish_timeout_seconds)
+_validate_positive_number('mqtt.reconnect_attempts', cfg.mqtt.reconnect_attempts)
+_validate_positive_number('mqtt.retry_delay_seconds', cfg.mqtt.retry_delay_seconds, allow_zero=True)
+if cfg.mqtt.qos not in (0, 1, 2):
+    raise ValueError('mqtt.qos must be 0, 1, or 2')
 
 cfg.update('runtime.console', console)
 cfg.update('killer', GracefulKiller())
