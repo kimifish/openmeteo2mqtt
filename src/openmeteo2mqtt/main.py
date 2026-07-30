@@ -6,13 +6,14 @@ import copy
 import json
 import logging
 import math
+import random
+import threading
 import time
 from datetime import datetime
 
 import openmeteo_requests
 import pandas as pd
 import requests_cache
-import schedule
 from openmeteo_sdk.VariablesWithTime import VariablesWithTime
 from openmeteo_sdk.WeatherApiResponse import WeatherApiResponse
 from retry_requests import retry
@@ -32,6 +33,7 @@ FREE_TIER_LIMITS = {
 FORECAST_HOURS = 24
 DEFAULT_FORECAST_UPDATE_INTERVAL_IN_MINUTES = 60
 HTTP_STATUS_TO_RETRY = (429, 500, 502, 503, 504)
+MQTT_LIFECYCLE_LOCK = threading.RLock()
 
 def subscribe_mqtt_topics(mqttc):
     pass
@@ -335,7 +337,7 @@ def _configure_mqtt_availability(mqttc):
     return availability_topic
 
 
-def _connect_mqtt(mqttc):
+def _connect_mqtt_unlocked(mqttc):
     client = getattr(mqttc, 'client', None)
     if client is None:
         log.error('MQTT client is not initialized')
@@ -383,8 +385,15 @@ def _connect_mqtt(mqttc):
     return False
 
 
-def _publish_message(mqttc, topic, payload, retain=None):
-    if not _connect_mqtt(mqttc):
+def _connect_mqtt(mqttc):
+    with MQTT_LIFECYCLE_LOCK:
+        if cfg.killer.kill_now or getattr(mqttc, 'shutdown', False):
+            return False
+        return _connect_mqtt_unlocked(mqttc)
+
+
+def _publish_message_unlocked(mqttc, topic, payload, retain=None):
+    if not mqttc.client.is_connected() and not _connect_mqtt(mqttc):
         return False
 
     retain = cfg.mqtt.retain if retain is None else retain
@@ -409,6 +418,13 @@ def _publish_message(mqttc, topic, payload, retain=None):
         return False
 
 
+def _publish_message(mqttc, topic, payload, retain=None):
+    with MQTT_LIFECYCLE_LOCK:
+        if cfg.killer.kill_now or getattr(mqttc, 'shutdown', False):
+            return False
+        return _publish_message_unlocked(mqttc, topic, payload, retain)
+
+
 def _publish_status(mqttc, update_name, state, error=None):
     status = {
         'state': state,
@@ -425,16 +441,17 @@ def _publish_status(mqttc, update_name, state, error=None):
 
 
 def _shutdown_mqtt(mqttc, availability_topic):
-    mqttc.shutdown = True
-    if mqttc.client.is_connected():
-        _publish_message(mqttc, availability_topic, 'offline', retain=True)
-    try:
-        mqttc.client.disconnect()
-    except Exception:
-        log.warning('MQTT disconnect failed', exc_info=True)
-    finally:
-        mqttc.loop_stop()
-        mqttc.connected = False
+    with MQTT_LIFECYCLE_LOCK:
+        mqttc.shutdown = True
+        if mqttc.client.is_connected():
+            _publish_message_unlocked(mqttc, availability_topic, 'offline', retain=True)
+        try:
+            mqttc.client.disconnect()
+        except Exception:
+            log.warning('MQTT disconnect failed', exc_info=True)
+        finally:
+            mqttc.loop_stop()
+            mqttc.connected = False
 
 
 def post_weather(mqttc, data_dict):
@@ -454,6 +471,8 @@ def _run_update(mqttc, update_name, get_data):
         return False
     try:
         data = get_data()
+        if cfg.killer.kill_now:
+            return False
         if not data:
             return True
         if not _publish_status(mqttc, update_name, 'updating'):
@@ -466,8 +485,9 @@ def _run_update(mqttc, update_name, get_data):
         log.debug('%s update completed', update_name.capitalize())
         return True
     except Exception as error:
-        log.exception('%s update failed; the service will retry on schedule', update_name.capitalize())
-        _publish_status(mqttc, update_name, 'error', error)
+        log.exception('%s update failed; the service will retry with backoff', update_name.capitalize())
+        if not cfg.killer.kill_now:
+            _publish_status(mqttc, update_name, 'error', error)
         return False
 
 
@@ -479,29 +499,69 @@ def retrieve_and_post_forecast(mqttc):
     return _run_update(mqttc, 'forecast', get_forecast_weather_data)
 
 
+def _get_retry_delay(base_delay):
+    jitter = random.uniform(0, cfg.retry.jitter_seconds)
+    return min(cfg.retry.max_delay_seconds, base_delay + jitter)
+
+
+def _run_update_worker(mqttc, update_name, get_data, interval_minutes):
+    retry_delay = cfg.retry.initial_delay_seconds
+    while not cfg.killer.kill_now:
+        success = _run_update(mqttc, update_name, get_data)
+        if cfg.killer.kill_now:
+            return
+
+        if success:
+            wait_seconds = interval_minutes * 60
+            retry_delay = cfg.retry.initial_delay_seconds
+        else:
+            wait_seconds = _get_retry_delay(retry_delay)
+            log.warning(
+                '%s update will retry in %.1f seconds',
+                update_name.capitalize(),
+                wait_seconds,
+            )
+            retry_delay = min(
+                cfg.retry.max_delay_seconds,
+                retry_delay * cfg.retry.multiplier,
+            )
+
+        _interruptible_sleep(wait_seconds)
+
+
 def main():
     _log_usage_budget()
     mqttc = MQTT(host=cfg.mqtt.server, port=cfg.mqtt.port)
     subscribe_mqtt_topics(mqttc)
     availability_topic = _configure_mqtt_availability(mqttc)
-    schedule.clear()
-    schedule.every(cfg.update_interval_in_minutes).minutes.do(retrieve_and_post_weather, mqttc=mqttc)
+    workers = [
+        threading.Thread(
+            target=_run_update_worker,
+            args=(mqttc, 'current', get_current_weather_data, cfg.update_interval_in_minutes),
+            name='current-weather-updater',
+            daemon=True,
+        ),
+    ]
     if getattr(cfg.params, 'hourly', []) or getattr(cfg.params, 'daily', []):
-        schedule.every(_get_forecast_update_interval_in_minutes()).minutes.do(retrieve_and_post_forecast, mqttc=mqttc)
+        workers.append(
+            threading.Thread(
+                target=_run_update_worker,
+                args=(mqttc, 'forecast', get_forecast_weather_data, _get_forecast_update_interval_in_minutes()),
+                name='forecast-weather-updater',
+                daemon=True,
+            )
+        )
 
     try:
-        _connect_mqtt(mqttc)
-        retrieve_and_post_weather(mqttc)
-        retrieve_and_post_forecast(mqttc)
-
+        for worker in workers:
+            worker.start()
         while not cfg.killer.kill_now:
-            try:
-                schedule.run_pending()
-            except Exception:
-                log.exception('Unexpected scheduler error; continuing')
             _interruptible_sleep(1)
     finally:
-        schedule.clear()
+        for worker in workers:
+            worker.join(timeout=1)
+            if worker.is_alive():
+                log.warning('%s is still finishing a bounded network request', worker.name)
         _shutdown_mqtt(mqttc, availability_topic)
         log.info('OpenMeteo2MQTT stopped')
 

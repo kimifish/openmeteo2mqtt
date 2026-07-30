@@ -38,8 +38,8 @@ class FetchWeatherResponseTests(unittest.TestCase):
         session.close.assert_called_once_with()
 
 
-class ScheduledUpdateTests(unittest.TestCase):
-    def test_temporary_failure_does_not_escape_scheduler_job(self):
+class UpdateTests(unittest.TestCase):
+    def test_temporary_failure_does_not_escape_update(self):
         mqttc = Mock()
         error = TimeoutError('network stalled')
 
@@ -75,6 +75,45 @@ class ScheduledUpdateTests(unittest.TestCase):
         self.assertFalse(result)
         self.assertEqual(publish_status.call_args_list[0], unittest.mock.call(mqttc, 'current', 'updating'))
         self.assertEqual(publish_status.call_args_list[1].args[:3], (mqttc, 'current', 'error'))
+
+    def test_worker_backoff_grows_and_resets_after_success(self):
+        waits = []
+
+        def record_sleep(seconds):
+            waits.append(seconds)
+            if len(waits) == 3:
+                main.cfg.killer.kill_now = True
+
+        with patch.object(main.cfg.killer, 'kill_now', False), \
+                patch.object(main.cfg.retry, 'initial_delay_seconds', 5), \
+                patch.object(main.cfg.retry, 'max_delay_seconds', 180), \
+                patch.object(main.cfg.retry, 'multiplier', 2), \
+                patch.object(main, '_run_update', side_effect=[False, False, True]), \
+                patch.object(main, '_interruptible_sleep', side_effect=record_sleep), \
+                patch.object(main.random, 'uniform', return_value=0):
+            main._run_update_worker(Mock(), 'current', Mock(), interval_minutes=15)
+
+        self.assertEqual(waits, [5, 10, 900])
+
+    def test_retry_delay_never_exceeds_configured_maximum(self):
+        with patch.object(main.random, 'uniform', return_value=main.cfg.retry.jitter_seconds):
+            delay = main._get_retry_delay(main.cfg.retry.max_delay_seconds)
+
+        self.assertEqual(delay, main.cfg.retry.max_delay_seconds)
+
+    def test_finished_fetch_is_not_published_after_shutdown(self):
+        mqttc = Mock()
+
+        def finish_during_shutdown():
+            main.cfg.killer.kill_now = True
+            return {'current': '{}'}
+
+        with patch.object(main.cfg.killer, 'kill_now', False), \
+                patch.object(main, 'post_weather') as post_weather:
+            result = main._run_update(mqttc, 'current', finish_during_shutdown)
+
+        self.assertFalse(result)
+        post_weather.assert_not_called()
 
 
 class MqttPublishTests(unittest.TestCase):

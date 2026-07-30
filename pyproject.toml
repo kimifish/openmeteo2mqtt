@@ -1,6 +1,6 @@
 [project]
 name = "openmeteo2mqtt"
-version = "0.2.2"
+version = "0.2.3"
 description = "Populates MQTT topics with openmeteo data."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -16,7 +16,6 @@ dependencies = [
     "requests-cache>=1.2.1",
     "retry-requests>=2.0.0",
     "rich>=14.0.0",
-    "schedule>=1.2.2",
 ]
 
 [tool.setuptools]

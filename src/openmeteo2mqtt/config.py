@@ -4,6 +4,7 @@
 # pyright: reportAttributeAccessIssue=false
 
 import logging
+import math
 import os
 import sys
 from rich.console import Console
@@ -211,6 +212,11 @@ cfg.validate_config(
         ('http.retries', 4),
         ('http.backoff_factor', 1),
 
+        ('retry.initial_delay_seconds', 5),
+        ('retry.max_delay_seconds', 180),
+        ('retry.multiplier', 2),
+        ('retry.jitter_seconds', 5),
+
         ('proxy.url', None),
         ('proxy.port', None),
     ]
@@ -220,6 +226,8 @@ cfg.validate_config(
 def _validate_positive_number(name, value, allow_zero=False):
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise ValueError(f'{name} must be a number')
+    if not math.isfinite(value):
+        raise ValueError(f'{name} must be finite')
     if value < 0 or (value == 0 and not allow_zero):
         qualifier = 'non-negative' if allow_zero else 'positive'
         raise ValueError(f'{name} must be {qualifier}')
@@ -235,6 +243,14 @@ _validate_positive_number('http.connect_timeout_seconds', cfg.http.connect_timeo
 _validate_positive_number('http.read_timeout_seconds', cfg.http.read_timeout_seconds)
 _validate_positive_number('http.retries', cfg.http.retries, allow_zero=True)
 _validate_positive_number('http.backoff_factor', cfg.http.backoff_factor, allow_zero=True)
+_validate_positive_number('retry.initial_delay_seconds', cfg.retry.initial_delay_seconds)
+_validate_positive_number('retry.max_delay_seconds', cfg.retry.max_delay_seconds)
+_validate_positive_number('retry.multiplier', cfg.retry.multiplier)
+_validate_positive_number('retry.jitter_seconds', cfg.retry.jitter_seconds, allow_zero=True)
+if cfg.retry.multiplier <= 1:
+    raise ValueError('retry.multiplier must be greater than 1')
+if cfg.retry.max_delay_seconds < cfg.retry.initial_delay_seconds:
+    raise ValueError('retry.max_delay_seconds must not be less than retry.initial_delay_seconds')
 _validate_positive_number('mqtt.connect_timeout_seconds', cfg.mqtt.connect_timeout_seconds)
 _validate_positive_number('mqtt.publish_timeout_seconds', cfg.mqtt.publish_timeout_seconds)
 _validate_positive_number('mqtt.reconnect_attempts', cfg.mqtt.reconnect_attempts)

@@ -89,6 +89,12 @@ http:
   retries: 4
   backoff_factor: 1
 
+retry:
+  initial_delay_seconds: 5
+  max_delay_seconds: 180
+  multiplier: 2
+  jitter_seconds: 5
+
 # Open-Meteo API URL (usually no need to change)
 url: "https://api.open-meteo.com/v1/forecast"
 
@@ -250,7 +256,7 @@ The following subtopics are used:
     }
     ```
 *   `{base_topic}/availability`: retained `online`/`offline` service availability. The MQTT last will publishes `offline` after an ungraceful disconnect.
-*   `{base_topic}/status/current` and `{base_topic}/status/forecast`: retained JSON status. A failed update is reported as `state: error` without terminating the service; the next scheduled update is still attempted.
+*   `{base_topic}/status/current` and `{base_topic}/status/forecast`: retained JSON status. A failed update is reported as `state: error` without terminating the service. Current weather and forecast retry independently forever, using exponential backoff capped at three minutes, and return to their normal intervals after a successful update.
 
 ## Open-Meteo Limits
 
@@ -279,7 +285,6 @@ Key dependencies include:
 *   [`pandas`](https://pandas.pydata.org/): For data manipulation.
 *   [`requests-cache`](https://pypi.org/project/requests-cache/): For caching API requests.
 *   [`retry-requests`](https://pypi.org/project/retry-requests/): For retrying failed requests.
-*   [`schedule`](https://pypi.org/project/schedule/): For scheduling periodic tasks.
 *   [`rich`](https://pypi.org/project/rich/): For rich terminal output and logging.
 *   [`kimiconfig`](https://pypi.org/project/kimiconfig/): For configuration management.
 *   [`kimqtt`](https://pypi.org/project/kimqtt/): For MQTT communication.

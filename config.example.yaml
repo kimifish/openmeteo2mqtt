@@ -20,6 +20,12 @@ http:
   retries: 4
   backoff_factor: 1
 
+retry:
+  initial_delay_seconds: 5
+  max_delay_seconds: 180
+  multiplier: 2
+  jitter_seconds: 5
+
 url: "https://api.open-meteo.com/v1/forecast"
 
 params:
